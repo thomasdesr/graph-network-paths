@@ -1,92 +1,70 @@
 import asyncio
-from collections import defaultdict
-from contextlib import asynccontextmanager
-import ipaddress
 import itertools
+import ipaddress
 import random
 import secrets
 
 import aiosqlite
-import async_timeout
-import mtrpacket
-import tqdm.asyncio
+from tqdm.asyncio import tqdm
+
+from aiotraceroute import aiotraceroute
 
 
-@asynccontextmanager
-async def mtr_clients(max_count):
-    clients = await asyncio.gather(
-        *[mtrpacket.MtrPacket().open() for _ in range(max_count)]
-    )
+async def gather_with_concurrency(tasks, concurrency):
+    semaphore = asyncio.Semaphore(concurrency)
 
-    try:
-        yield itertools.cycle(clients)
-    finally:
-        for client in clients:
-            await client.close()
+    async def sem_task(task):
+        async with semaphore:
+            return await task
+
+    return await asyncio.gather(*(sem_task(task) for task in tasks))
 
 
-def probe_generator(mtr, ip_address, sem):
-    probes = [{"host": ip_address, "ttl": ttl} for ttl in range(2, 5)]
-
-    async def probe(timeout=1, **kwargs):
-        try:
-            # Using a semaphore here is important because otherwise the timeout
-            # starts to tick when we enter this function
-            async with sem, async_timeout.timeout(timeout):
-                result = await mtr.probe(**kwargs)
-        except asyncio.TimeoutError:
-            result = mtrpacket.ProbeResult(False, "timeout", timeout * 1000, None, None)
-
-        return (ip_address, kwargs["ttl"], result)
-
-    return (probe(**probe_kwargs) for probe_kwargs in probes)
+async def traceroute_ip(sem, ip_addr, max_hops=10, timeout=1):
+    async with sem:
+        return [
+            (ip_addr, *res)
+            async for res in aiotraceroute(ip_addr, max_hops=max_hops, timeout=timeout)
+        ]
 
 
-async def run(ips_to_scan):
-    max_concurrency = min(100, len(ips_to_scan) * 5)
+def grouper(iterable, n):
+    it = iter(iterable)
+    while True:
+        chunk = tuple(itertools.islice(it, n))
+        if not chunk:
+            return
+        yield chunk
 
+
+async def run(ips_to_scan, max_concurrency=250):
     sem = asyncio.Semaphore(max_concurrency)
 
-    async with mtr_clients(max_count=max_concurrency) as clients:
-        tasks = list(
-            itertools.chain.from_iterable(
-                probe_generator(client, ip_address, sem)
-                for client, ip_address in zip(clients, ips_to_scan)
-            )
-        )
+    for batch in grouper(ips_to_scan, max_concurrency * 100):
+        tasks = [traceroute_ip(sem, ip_addr) for ip_addr in batch]
+
         random.shuffle(tasks)
 
-        for task in tqdm.tqdm(
+        for task in tqdm(
             asyncio.as_completed(tasks),
             desc="tracerouting",
             total=len(tasks),
         ):
-            ip_address, ttl, probe = await task
-
-            yield (
-                ip_address,
-                {
-                    "ttl": ttl,
-                    "result": probe.result,
-                    "time_ms": probe.time_ms,
-                    "responder": probe.responder,
-                },
-            )
-
-
-async def batch_run(ips_to_scan):
-    responses = defaultdict(lambda: [])
-
-    async for ip_address, result in run(ips_to_scan):
-        responses[ip_address].append(result)
-
-    return responses
+            for ip_address, ttl, result, next_addr, time_ms in await task:
+                yield (
+                    ip_address,
+                    {
+                        "ttl": ttl,
+                        "time_ms": time_ms,
+                        "result": result,
+                        "responder": next_addr,
+                    },
+                )
 
 
 def random_ip(network: ipaddress.IPv4Network):
     random_prefix_length = random.randint(
-        16,
-        24,
+        max(16, network.prefixlen), min(27, network.prefixlen)
     )
 
     random_subnet = random.choice(
@@ -97,14 +75,15 @@ def random_ip(network: ipaddress.IPv4Network):
 
 
 async def main():
-    prefix_length = 20
+    scan_target = ipaddress.ip_network("0.0.0.0/4")
+    prefix_length = 24
 
     ips_to_scan = [
         random_ip(network)
-        for network in tqdm.tqdm(
-            ipaddress.ip_network("0.0.0.0/0").subnets(new_prefix=prefix_length),
+        for network in tqdm(
+            scan_target.subnets(new_prefix=prefix_length),
             desc="ip selection",
-            total=(2 ** prefix_length),
+            total=(2 ** (prefix_length - scan_target.prefixlen)),
         )
     ]
 

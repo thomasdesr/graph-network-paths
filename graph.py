@@ -4,7 +4,7 @@ import graphviz
 import pyasn
 from tqdm import tqdm
 
-asndb = pyasn.pyasn("./ipasn_20201227.dat")
+asndb = pyasn.pyasn("./ipasn_20210227.dat")
 
 
 def lookup_nodes_ptr(nodes):

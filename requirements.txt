@@ -5,3 +5,5 @@ tqdm
 async_timeout
 graphviz
 aiosqlite
+aiodns
+pyasn
