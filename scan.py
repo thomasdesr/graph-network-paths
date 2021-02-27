@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import itertools
 import ipaddress
 import random
@@ -20,46 +21,47 @@ async def gather_with_concurrency(tasks, concurrency):
     return await asyncio.gather(*(sem_task(task) for task in tasks))
 
 
-async def traceroute_ip(sem, ip_addr, max_hops=10, timeout=1):
-    async with sem:
-        return [
-            (ip_addr, *res)
-            async for res in aiotraceroute(ip_addr, max_hops=max_hops, timeout=timeout)
-        ]
-
-
-def grouper(iterable, n):
-    it = iter(iterable)
-    while True:
-        chunk = tuple(itertools.islice(it, n))
-        if not chunk:
-            return
-        yield chunk
+async def traceroute_ip(ip_addr, max_hops=10, timeout=1):
+    return [
+        (ip_addr, *res)
+        async for res in aiotraceroute(ip_addr, max_hops=max_hops, timeout=timeout)
+    ]
 
 
 async def run(ips_to_scan, max_concurrency=250):
-    sem = asyncio.Semaphore(max_concurrency)
+    ips_to_scan = copy.copy(ips_to_scan)
+    random.shuffle(ips_to_scan)
 
-    for batch in grouper(ips_to_scan, max_concurrency * 100):
-        tasks = [traceroute_ip(sem, ip_addr) for ip_addr in batch]
+    tasks = asyncio.Queue()
+    results = asyncio.Queue()
 
-        random.shuffle(tasks)
+    for ip_addr in ips_to_scan:
+        tasks.put_nowait(traceroute_ip(ip_addr))
 
-        for task in tqdm(
-            asyncio.as_completed(tasks),
-            desc="tracerouting",
-            total=len(tasks),
-        ):
-            for ip_address, ttl, result, next_addr, time_ms in await task:
-                yield (
-                    ip_address,
-                    {
-                        "ttl": ttl,
-                        "time_ms": time_ms,
-                        "result": result,
-                        "responder": next_addr,
-                    },
+    pbar = tqdm(desc="tracerouting", total=len(ips_to_scan))
+
+    async def worker():
+        while not tasks.empty():
+            for ip_address, ttl, result, next_addr, time_ms in await tasks.get_nowait():
+                results.put_nowait(
+                    (
+                        ip_address,
+                        {
+                            "ttl": ttl,
+                            "time_ms": time_ms,
+                            "result": result,
+                            "responder": next_addr,
+                        },
+                    )
                 )
+
+            tasks.task_done()
+            pbar.update(1)
+
+    await asyncio.gather(*[worker() for _ in range(max_concurrency)])
+
+    while not results.empty():
+        yield results.get_nowait()
 
 
 def random_ip(network: ipaddress.IPv4Network):
@@ -75,8 +77,8 @@ def random_ip(network: ipaddress.IPv4Network):
 
 
 async def main():
-    scan_target = ipaddress.ip_network("0.0.0.0/4")
-    prefix_length = 24
+    scan_target = ipaddress.ip_network("0.0.0.0/0")
+    prefix_length = 20
 
     ips_to_scan = [
         random_ip(network)
