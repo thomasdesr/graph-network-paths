@@ -95,7 +95,7 @@ async def main():
     ]
 
     run_id = secrets.token_urlsafe(16)
-    async with aiosqlite.connect("./results.db") as conn:
+    async with aiosqlite.connect("./results.db", isolation_level=None) as conn:
         await conn.execute("PRAGMA journal_mode = wal")
         await conn.execute("PRAGMA busy_timeout = 5000")
 
