@@ -1,6 +1,5 @@
 import asyncio
 import copy
-import itertools
 import ipaddress
 import random
 import secrets
@@ -42,7 +41,9 @@ async def run(ips_to_scan, max_concurrency=250):
 
     async def worker():
         while not tasks.empty():
-            for ip_address, ttl, result, next_addr, time_ms in await tasks.get_nowait():
+            result = await tasks.get_nowait()
+
+            for ip_address, ttl, result, next_addr, time_ms in result:
                 results.put_nowait(
                     (
                         ip_address,
@@ -58,10 +59,14 @@ async def run(ips_to_scan, max_concurrency=250):
             tasks.task_done()
             pbar.update(1)
 
-    await asyncio.gather(*[worker() for _ in range(max_concurrency)])
+    workers = [asyncio.create_task(worker()) for _ in range(max_concurrency)]
 
-    while not results.empty():
-        yield results.get_nowait()
+    while len(workers) != 0:
+        _, workers = await asyncio.wait(workers, timeout=1)
+
+        # Drain the queue
+        while not results.empty():
+            yield results.get_nowait()
 
 
 def random_ip(network: ipaddress.IPv4Network):
