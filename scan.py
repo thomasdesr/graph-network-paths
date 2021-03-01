@@ -34,7 +34,7 @@ async def run(ips_to_scan, max_concurrency=250):
     tasks = asyncio.Queue()
     results = asyncio.Queue()
 
-    for ip_addr in ips_to_scan:
+    for ip_addr in tqdm(ips_to_scan, desc="creating tasks"):
         tasks.put_nowait(traceroute_ip(ip_addr))
 
     pbar = tqdm(desc="tracerouting", total=len(ips_to_scan))
